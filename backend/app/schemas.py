@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Severity = Literal["high", "medium", "low"]
 EngineMode = Literal["hybrid_ai", "rules_demo", "hybrid_fallback"]
+AIProvider = Literal["siliconflow", "deepseek"]
 
 
 class DocumentBlock(BaseModel):
@@ -113,3 +114,25 @@ class AIReviewPayload(BaseModel):
     counterparty_role: str = "合同相对方"
     key_terms: list[str] = Field(default_factory=list)
     risks: list[RiskItem] = Field(default_factory=list)
+
+
+class AISettingsRequest(BaseModel):
+    provider: AIProvider
+    api_key: str = Field(min_length=16, max_length=512)
+    model: str = Field(min_length=3, max_length=160)
+
+    @field_validator("api_key", "model")
+    @classmethod
+    def strip_ai_setting(cls, value: str) -> str:
+        return value.strip()
+
+
+class AISettingsStatus(BaseModel):
+    configured: bool
+    provider: AIProvider
+    base_url: str
+    model: str
+    key_hint: str | None = None
+    storage: Literal["memory_only"] = "memory_only"
+    tested_model: str | None = None
+    test_tokens: int | None = None

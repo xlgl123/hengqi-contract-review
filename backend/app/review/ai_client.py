@@ -91,6 +91,67 @@ class AIClient:
                 body["reasoning_effort"] = "high"
         return body
 
+    async def _post(self, body: dict[str, object]) -> dict[str, object]:
+        headers = {
+            "Authorization": f"Bearer {self.settings.ai_api_key}",
+            "Content-Type": "application/json",
+        }
+        endpoint = f"{self.settings.ai_base_url}/chat/completions"
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
+                response = await client.post(endpoint, headers=headers, json=body)
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            friendly = {
+                400: "请求参数或模型名称不受支持。",
+                401: "API密钥无效或已失效。",
+                402: "API账户余额不足。",
+                403: "API密钥没有调用该模型的权限。",
+                404: "模型或接口不存在。",
+                429: "API请求过于频繁，请稍后重试。",
+            }.get(status, f"AI服务返回HTTP {status}。")
+            raise AIReviewError(friendly) from exc
+        except httpx.TimeoutException as exc:
+            raise AIReviewError("AI服务响应超时，请稍后重试。") from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise AIReviewError(f"AI服务连接失败：{type(exc).__name__}") from exc
+        if not isinstance(payload, dict):
+            raise AIReviewError("AI服务返回了无法识别的数据。")
+        return payload
+
+    async def test_connection(self) -> dict[str, object]:
+        if not self.enabled:
+            raise AIReviewError("API密钥不能为空。")
+        body = self._request_body(
+            [
+                {"role": "system", "content": "你是连接测试助手。"},
+                {"role": "user", "content": "只回复OK"},
+            ]
+        )
+        body.pop("response_format", None)
+        body["max_tokens"] = 16
+        if "siliconflow.cn" in self.settings.ai_base_url.lower():
+            body["enable_thinking"] = False
+            body.pop("thinking", None)
+        else:
+            body["thinking"] = {"type": "disabled"}
+            body.pop("enable_thinking", None)
+        body.pop("reasoning_effort", None)
+        payload = await self._post(body)
+        try:
+            content = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AIReviewError("AI连接成功，但响应缺少content字段。") from exc
+        if not str(content or "").strip():
+            raise AIReviewError("AI连接成功，但返回内容为空。")
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        return {
+            "model": str(payload.get("model") or self.settings.ai_model_review),
+            "total_tokens": int(usage.get("total_tokens") or 0),
+        }
+
     async def review(
         self,
         parsed: ParsedContract,
@@ -113,18 +174,7 @@ class AIClient:
                 {"role": "user", "content": user_prompt},
             ]
         )
-        headers = {
-            "Authorization": f"Bearer {self.settings.ai_api_key}",
-            "Content-Type": "application/json",
-        }
-        endpoint = f"{self.settings.ai_base_url}/chat/completions"
-        try:
-            async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
-                response = await client.post(endpoint, headers=headers, json=body)
-                response.raise_for_status()
-                payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise AIReviewError(f"AI服务调用失败：{type(exc).__name__}") from exc
+        payload = await self._post(body)
 
         try:
             content = payload["choices"][0]["message"]["content"]

@@ -79,6 +79,10 @@ class ReviewService:
         self.store = store
         self.ai = AIClient(settings)
 
+    def update_settings(self, settings: Settings) -> None:
+        self.settings = settings
+        self.ai = AIClient(settings)
+
     async def review(self, parsed: ParsedContract, role: str) -> ReviewResult:
         our_role, counterparty_role = role_labels(role)
         local_risks = run_rules(parsed, role)
@@ -130,4 +134,3 @@ class ReviewService:
         self.store.purge_expired(now.isoformat())
         self.store.save(result)
         return result
-

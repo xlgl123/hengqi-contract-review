@@ -3,6 +3,7 @@ import { CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "
 type Severity = "high" | "medium" | "low";
 type EngineMode = "hybrid_ai" | "rules_demo" | "hybrid_fallback";
 type SourceFilter = "all" | "rule" | "ai";
+type AIProvider = "siliconflow" | "deepseek";
 
 interface RiskItem {
   risk_id: string;
@@ -62,6 +63,32 @@ interface ReviewListItem {
   created_at: string;
   expires_at: string;
 }
+
+interface AISettingsStatus {
+  configured: boolean;
+  provider: AIProvider;
+  base_url: string;
+  model: string;
+  key_hint: string | null;
+  storage: "memory_only";
+  tested_model: string | null;
+  test_tokens: number | null;
+}
+
+const aiPresets: Record<AIProvider, { label: string; baseUrl: string; model: string; note: string }> = {
+  siliconflow: {
+    label: "SiliconFlow",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    model: "deepseek-ai/DeepSeek-V4-Flash",
+    note: "推荐用于本地测试，兼容OpenAI接口",
+  },
+  deepseek: {
+    label: "DeepSeek 官方",
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-v4-flash",
+    note: "使用DeepSeek官方API账户",
+  },
+};
 
 const roleOptions = [
   ["service_provider", "乙方 / 服务提供方"],
@@ -157,6 +184,14 @@ export default function App() {
   const [result, setResult] = useState<ReviewResult | null>(null);
   const [history, setHistory] = useState<ReviewListItem[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [aiStatus, setAIStatus] = useState<AISettingsStatus | null>(null);
+  const [showAISettings, setShowAISettings] = useState(false);
+  const [aiProvider, setAIProvider] = useState<AIProvider>("siliconflow");
+  const [aiKey, setAIKey] = useState("");
+  const [aiModel, setAIModel] = useState(aiPresets.siliconflow.model);
+  const [aiTesting, setAITesting] = useState(false);
+  const [aiError, setAIError] = useState("");
+  const [aiSuccess, setAISuccess] = useState("");
   const [severityFilter, setSeverityFilter] = useState<"all" | Severity>("all");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -203,6 +238,85 @@ export default function App() {
     }
   }
 
+  async function refreshAIStatus() {
+    try {
+      const response = await fetch("/api/settings/ai");
+      if (response.ok) {
+        const status: AISettingsStatus = await response.json();
+        setAIStatus(status);
+        setAIProvider(status.provider);
+        setAIModel(status.model);
+      }
+    } catch {
+      // 设置状态不阻断合同审查主流程。
+    }
+  }
+
+  function openAISettings() {
+    const provider = aiStatus?.provider || "siliconflow";
+    setAIProvider(provider);
+    setAIModel(aiStatus?.model || aiPresets[provider].model);
+    setAIKey("");
+    setAIError("");
+    setAISuccess("");
+    setShowAISettings(true);
+  }
+
+  function closeAISettings() {
+    if (aiTesting) return;
+    setShowAISettings(false);
+    setAIKey("");
+    setAIError("");
+    setAISuccess("");
+  }
+
+  function changeAIProvider(provider: AIProvider) {
+    setAIProvider(provider);
+    setAIModel(aiPresets[provider].model);
+    setAIError("");
+    setAISuccess("");
+  }
+
+  async function connectAI(event: FormEvent) {
+    event.preventDefault();
+    setAITesting(true);
+    setAIError("");
+    setAISuccess("");
+    try {
+      const response = await fetch("/api/settings/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: aiProvider, api_key: aiKey, model: aiModel }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "AI连接测试失败");
+      setAIStatus(payload);
+      setAIKey("");
+      setAISuccess(`连接成功 · ${payload.tested_model || payload.model} · 测试消耗${payload.test_tokens || 0} tokens`);
+    } catch (err) {
+      setAIError(err instanceof Error ? err.message : "AI连接测试失败");
+    } finally {
+      setAITesting(false);
+    }
+  }
+
+  async function clearAIConnection() {
+    setAITesting(true);
+    setAIError("");
+    try {
+      const response = await fetch("/api/settings/ai", { method: "DELETE" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "清除配置失败");
+      setAIStatus(payload);
+      setAIKey("");
+      setAISuccess("AI连接已清除，当前恢复为本地规则演示模式。");
+    } catch (err) {
+      setAIError(err instanceof Error ? err.message : "清除配置失败");
+    } finally {
+      setAITesting(false);
+    }
+  }
+
   async function runReview(inputText: string, inputFile: File | null, selectedRole: string, scroll = true) {
     setLoading(true);
     setLoadingStep(0);
@@ -233,7 +347,10 @@ export default function App() {
 
   useEffect(() => {
     void refreshHistory();
-    if (new URLSearchParams(window.location.search).get("demo") !== "1" || demoStarted.current) return;
+    void refreshAIStatus();
+    const searchParams = new URLSearchParams(window.location.search);
+    if (searchParams.get("settings") === "ai") setShowAISettings(true);
+    if (searchParams.get("demo") !== "1" || demoStarted.current) return;
     demoStarted.current = true;
     void (async () => {
       setLoadingSample(true);
@@ -335,6 +452,9 @@ export default function App() {
         </a>
         <nav>
           <span className="privacy-pill"><i /> 合同文本不入库</span>
+          <button className={`ai-nav-button ${aiStatus?.configured ? "connected" : ""}`} type="button" onClick={openAISettings}>
+            <i /> {aiStatus?.configured ? "AI已连接" : "连接AI"}
+          </button>
           <button className="nav-button" type="button" onClick={() => setShowHistory(true)}>
             近期审查 <b>{history.length}</b>
           </button>
@@ -410,6 +530,10 @@ export default function App() {
               <button className="primary-action" type="submit" disabled={submitDisabled}>
                 {loading ? "正在审查合同…" : <><span>开始智能审查</span><b>→</b></>}
               </button>
+              <div className={`ai-mode-strip ${aiStatus?.configured ? "connected" : ""}`}>
+                <span><i />{aiStatus?.configured ? `${aiPresets[aiStatus.provider].label} · ${aiStatus.model}` : "当前为本地规则演示模式"}</span>
+                <button type="button" onClick={openAISettings}>{aiStatus?.configured ? "管理连接" : "连接AI →"}</button>
+              </div>
               <p className="privacy-note">🔒 文件仅在内存中解析，结果24小时后自动清理</p>
 
               {loading && (
@@ -547,6 +671,77 @@ export default function App() {
       </main>
 
       <footer className="site-footer"><div><span className="brand-mark">衡</span><strong>衡契 · 中小企业合同风险助手</strong></div><p>让合同审查从“看懂法律”变成“做出经营决策”</p></footer>
+
+      {showAISettings && (
+        <div className="settings-backdrop" onMouseDown={closeAISettings}>
+          <section className="ai-settings-card" onMouseDown={(event) => event.stopPropagation()} aria-label="AI连接设置">
+            <div className="settings-heading">
+              <div><span className="settings-icon">✦</span><div><small>AI CONNECTION</small><h2>连接 AI 审查服务</h2></div></div>
+              <button type="button" onClick={closeAISettings} disabled={aiTesting}>×</button>
+            </div>
+
+            <div className={`current-connection ${aiStatus?.configured ? "connected" : ""}`}>
+              <span><i />{aiStatus?.configured ? "当前已连接" : "当前未连接"}</span>
+              <strong>{aiStatus?.configured ? `${aiPresets[aiStatus.provider].label} · ${aiStatus.key_hint}` : "合同将使用本地原创规则审查"}</strong>
+            </div>
+
+            <form onSubmit={connectAI}>
+              <label className="settings-label">选择API服务</label>
+              <div className="provider-options">
+                {(Object.keys(aiPresets) as AIProvider[]).map((provider) => (
+                  <button className={aiProvider === provider ? "active" : ""} type="button" key={provider} onClick={() => changeAIProvider(provider)} disabled={aiTesting}>
+                    <span>{provider === "siliconflow" ? "SF" : "DS"}</span>
+                    <span><strong>{aiPresets[provider].label}</strong><small>{aiPresets[provider].note}</small></span>
+                    <i>{aiProvider === provider ? "✓" : ""}</i>
+                  </button>
+                ))}
+              </div>
+
+              <label className="settings-label" htmlFor="ai-key">API Key</label>
+              <div className="secret-input">
+                <span>•••</span>
+                <input
+                  id="ai-key"
+                  type="password"
+                  value={aiKey}
+                  onChange={(event) => { setAIKey(event.target.value); setAIError(""); setAISuccess(""); }}
+                  placeholder={aiStatus?.configured ? "输入新密钥以更换当前连接" : "粘贴你的API密钥"}
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={aiTesting}
+                  required
+                  minLength={16}
+                />
+              </div>
+
+              <label className="settings-label" htmlFor="ai-model">模型名称</label>
+              <input
+                className="model-input"
+                id="ai-model"
+                value={aiModel}
+                onChange={(event) => setAIModel(event.target.value)}
+                disabled={aiTesting}
+                required
+              />
+              <div className="endpoint-row"><span>接口地址</span><code>{aiPresets[aiProvider].baseUrl}</code></div>
+
+              <div className="memory-notice">
+                <span>🔐</span><p><strong>仅本次运行有效</strong>密钥只保存在本机后端内存中，不写入源码、数据库、浏览器存储或GitHub；停止服务后自动消失。</p>
+              </div>
+
+              {aiError && <div className="settings-message error">× {aiError}</div>}
+              {aiSuccess && <div className="settings-message success">✓ {aiSuccess}</div>}
+
+              <div className="settings-actions">
+                {aiStatus?.configured && <button className="clear-ai" type="button" onClick={() => void clearAIConnection()} disabled={aiTesting}>清除当前连接</button>}
+                <button className="connect-ai" type="submit" disabled={aiTesting || aiKey.trim().length < 16 || aiModel.trim().length < 3}>
+                  {aiTesting ? <><span className="mini-spinner" /> 正在测试连接…</> : "测试并连接"}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
 
       {showHistory && (
         <div className="drawer-backdrop" onMouseDown={() => setShowHistory(false)}>

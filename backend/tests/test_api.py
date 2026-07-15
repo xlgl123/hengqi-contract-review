@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 
 TEST_DIR = Path(tempfile.mkdtemp(prefix="contract-mvp-test-"))
@@ -54,6 +55,34 @@ class APITests(unittest.TestCase):
             data={"text": "太短", "party_role": "service_provider"},
         )
         self.assertEqual(response.status_code, 400)
+
+    @patch("app.main.AIClient.test_connection", new_callable=AsyncMock)
+    def test_ai_can_be_configured_and_cleared_from_local_ui(self, test_connection: AsyncMock) -> None:
+        test_connection.return_value = {
+            "model": "deepseek-ai/DeepSeek-V4-Flash",
+            "total_tokens": 23,
+        }
+        self.client.delete("/api/settings/ai")
+        configured = self.client.post(
+            "/api/settings/ai",
+            json={
+                "provider": "siliconflow",
+                "api_key": "test-key-not-a-real-secret-123",
+                "model": "deepseek-ai/DeepSeek-V4-Flash",
+            },
+        )
+        self.assertEqual(configured.status_code, 200, configured.text)
+        payload = configured.json()
+        self.assertTrue(payload["configured"])
+        self.assertEqual(payload["provider"], "siliconflow")
+        self.assertEqual(payload["tested_model"], "deepseek-ai/DeepSeek-V4-Flash")
+        self.assertNotIn("test-key-not-a-real-secret", configured.text)
+        self.assertTrue(self.client.get("/api/health").json()["ai_configured"])
+
+        cleared = self.client.delete("/api/settings/ai")
+        self.assertEqual(cleared.status_code, 200)
+        self.assertFalse(cleared.json()["configured"])
+        self.assertFalse(self.client.get("/api/health").json()["ai_configured"])
 
 
 if __name__ == "__main__":

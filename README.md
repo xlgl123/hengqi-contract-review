@@ -8,9 +8,10 @@
 
 ## 当前状态
 
-- 未配置`AI_API_KEY`时，页面会明确显示“本地规则演示”，不会冒充AI输出。
+- 页面右上角提供“连接AI”，可直接选择SiliconFlow或DeepSeek、填写密钥并测试连接，不需要修改源码。
+- 未连接AI时，页面会明确显示“本地规则演示”，不会冒充AI输出。
 - 配置DeepSeek密钥后，使用`deepseek-v4-pro`补充跨条款风险，并对引用原文进行后端验证。
-- 使用SiliconFlow时，将`AI_BASE_URL`设为`https://api.siliconflow.cn/v1`、`AI_MODEL_REVIEW`设为平台中的模型标识；默认关闭思考模式以控制响应时间和费用。
+- 使用SiliconFlow时，网页默认填入`deepseek-ai/DeepSeek-V4-Flash`；默认关闭思考模式以控制响应时间和费用。
 - 支持DOCX、文本型PDF、TXT及粘贴文本。
 - 支持风险等级、领域、发现方式筛选及关键词搜索。
 - 支持一键复制修改建议和谈判话术、导出Markdown审查报告。
@@ -46,7 +47,7 @@ http://127.0.0.1:8765
 cd backend
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-$env:AI_API_KEY="你的DeepSeek密钥"  # 可选；不配置则使用规则演示
+$env:AI_API_KEY="你的DeepSeek密钥"  # 可选；也可以启动后在网页中连接
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
@@ -78,7 +79,8 @@ python -m unittest discover -s tests -v
 - 文件在内存中解析，不写入公开静态目录。
 - SQLite只保存结构化结果，不保存合同全文。
 - 结果默认保留24小时。
-- API密钥只从服务端环境变量读取。
+- 从网页连接时，API密钥只保存在本机服务进程内存中，不写入源码、浏览器存储或数据库；停止服务后需要重新填写。
+- AI配置接口仅允许从本机访问，供应商接口地址使用内置白名单。
 - 本地部署可从`.env.local`读取密钥，该文件不会提交到Git。
 
 ## 原创与依赖
