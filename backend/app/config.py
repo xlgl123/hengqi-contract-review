@@ -47,6 +47,13 @@ class Settings:
     def sample_path(self) -> Path:
         return self.root_dir / "data" / "sample_contract.txt"
 
+    @property
+    def ai_credential_path(self) -> Path:
+        configured = os.getenv("AI_CREDENTIAL_PATH", "").strip()
+        if configured:
+            return Path(configured)
+        return self.root_dir.parent / ".runtime" / "ai-settings.dpapi"
+
 
 def get_settings() -> Settings:
     root = Path(__file__).resolve().parents[1]

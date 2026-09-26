@@ -7,18 +7,45 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
+import webbrowser
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_ROOT = PROJECT_ROOT / "backend"
-RUNTIME_ROOT = (
-    Path("F:/Codex/temp/hengqi-contract-review")
-    if Path("F:/Codex").exists()
-    else PROJECT_ROOT / ".runtime"
-)
+RUNTIME_OWNER = "".join(
+    character for character in os.environ.get("USERNAME", "local").lower() if character.isalnum() or character in "-_"
+) or "local"
+
+
+def _select_runtime_root() -> Path:
+    configured = os.environ.get("HENGQI_RUNTIME_DIR", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured) / "data")
+    candidates.extend(
+        [
+            Path(f"F:/Codex/temp/hengqi-contract-review-{RUNTIME_OWNER}"),
+            PROJECT_ROOT / ".runtime",
+        ]
+    )
+    errors: list[str] = []
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / ".write-test"
+            probe.write_text("ok", encoding="ascii")
+            probe.unlink(missing_ok=True)
+            return candidate
+        except OSError as exc:
+            errors.append(f"{candidate}: {exc}")
+    raise RuntimeError("没有可写的本地运行目录：\n" + "\n".join(errors))
+
+
+RUNTIME_ROOT = _select_runtime_root()
 PID_FILE = RUNTIME_ROOT / "server.pid"
 STDOUT_FILE = RUNTIME_ROOT / "server.stdout.log"
 STDERR_FILE = RUNTIME_ROOT / "server.stderr.log"
@@ -58,8 +85,16 @@ def _read_pid() -> int | None:
         return None
 
 
+def _remove_pid_file() -> None:
+    try:
+        PID_FILE.unlink(missing_ok=True)
+    except PermissionError:
+        # A detached process may have created the file under another Codex
+        # sandbox identity. It can still be overwritten on the next start.
+        pass
+
+
 def start(port: int) -> int:
-    RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
     old_pid = _read_pid()
     if old_pid and _process_exists(old_pid):
         health = _health(port)
@@ -67,7 +102,7 @@ def start(port: int) -> int:
             print(f"衡契已经在运行：http://127.0.0.1:{port}")
             return 0
         raise RuntimeError(f"PID {old_pid}仍在运行，但健康检查失败。请先执行stop。")
-    PID_FILE.unlink(missing_ok=True)
+    _remove_pid_file()
 
     creationflags = 0
     if sys.platform == "win32":
@@ -107,7 +142,7 @@ def start(port: int) -> int:
         if process.poll() is not None:
             break
 
-    PID_FILE.unlink(missing_ok=True)
+    _remove_pid_file()
     error_tail = ""
     if STDERR_FILE.is_file():
         error_tail = "\n".join(STDERR_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-20:])
@@ -117,7 +152,7 @@ def start(port: int) -> int:
 def stop() -> int:
     pid = _read_pid()
     if not pid or not _process_exists(pid):
-        PID_FILE.unlink(missing_ok=True)
+        _remove_pid_file()
         print("衡契本地服务当前未运行。")
         return 0
     if sys.platform == "win32":
@@ -129,7 +164,7 @@ def stop() -> int:
         )
     else:
         os.kill(pid, signal.SIGTERM)
-    PID_FILE.unlink(missing_ok=True)
+    _remove_pid_file()
     print("衡契本地服务已停止。")
     return 0
 
@@ -141,16 +176,50 @@ def status(port: int) -> int:
     return 0 if health else 1
 
 
+def serve(port: int) -> int:
+    """Run Uvicorn in this process for a normal Windows desktop console."""
+    existing = _health(port)
+    if existing and existing.get("status") == "ok":
+        print(f"衡契已经在运行：http://127.0.0.1:{port}")
+        return 0
+    PID_FILE.write_text(str(os.getpid()), encoding="ascii")
+    try:
+        import uvicorn
+
+        def open_when_ready() -> None:
+            for _ in range(40):
+                time.sleep(0.25)
+                health = _health(port)
+                if health and health.get("status") == "ok":
+                    webbrowser.open(f"http://127.0.0.1:{port}")
+                    return
+
+        if os.environ.get("HENGQI_NO_BROWSER", "").strip() != "1":
+            threading.Thread(target=open_when_ready, daemon=True).start()
+        print("Keep this window open while using Hengqi Contract Review.")
+        print(f"The browser will open automatically: http://127.0.0.1:{port}")
+        uvicorn.run("app.main:app", host="127.0.0.1", port=port, app_dir=str(BACKEND_ROOT))
+        return 0
+    finally:
+        _remove_pid_file()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="衡契本地服务启停器")
-    parser.add_argument("action", choices=("start", "stop", "status"))
+    parser.add_argument("action", choices=("start", "serve", "stop", "status"))
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    if args.action == "start":
-        return start(args.port)
-    if args.action == "stop":
-        return stop()
-    return status(args.port)
+    try:
+        if args.action == "start":
+            return start(args.port)
+        if args.action == "serve":
+            return serve(args.port)
+        if args.action == "stop":
+            return stop()
+        return status(args.port)
+    except Exception as exc:
+        print(f"操作失败：{exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

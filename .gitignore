@@ -13,3 +13,34 @@ coverage/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+keystore.properties
+local.properties
+devices.json
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated dependencies and caches
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+coverage/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+Thumbs.db
+*.log

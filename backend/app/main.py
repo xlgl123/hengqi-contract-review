@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
@@ -15,10 +16,37 @@ from app.errors import ContractReviewError, UnsupportedDocumentError
 from app.parsers.service import parse_pasted_text, parse_upload
 from app.review.ai_client import AIClient
 from app.review.service import ReviewService
-from app.schemas import AISettingsRequest, AISettingsStatus, ReviewListItem, ReviewResult
+from app.reporting import build_review_docx
+from app.secure_settings import (
+    AICredentialStore,
+    SecureSettingsError,
+    StoredAISettings,
+)
+from app.schemas import (
+    AISettingsRequest,
+    AISettingsStatus,
+    LegalBasis,
+    LegalLibraryInfo,
+    ReviewListItem,
+    ReviewExportRequest,
+    ReviewResult,
+)
 
 
 settings = get_settings()
+credential_store = AICredentialStore(settings.ai_credential_path)
+saved_ai_settings = credential_store.load()
+ai_storage_mode = "environment" if settings.ai_enabled else "memory_only"
+if not settings.ai_enabled and saved_ai_settings:
+    settings = replace(
+        settings,
+        ai_base_url=saved_ai_settings.base_url,
+        ai_api_key=saved_ai_settings.api_key,
+        ai_model_review=saved_ai_settings.model,
+        ai_enable_thinking=False,
+        ai_max_tokens=4096,
+    )
+    ai_storage_mode = "encrypted_local"
 store = ReviewStore(settings.database_path)
 service = ReviewService(settings, store)
 
@@ -71,6 +99,7 @@ def _settings_status(
         base_url=base_url,
         model=model,
         key_hint=(f"••••{current.ai_api_key[-4:]}" if current.ai_enabled else None),
+        storage=ai_storage_mode,
         tested_model=tested_model,
         test_tokens=test_tokens,
     )
@@ -107,6 +136,7 @@ def get_ai_settings(request: Request) -> AISettingsStatus:
 async def configure_ai_settings(
     payload: AISettingsRequest, request: Request
 ) -> AISettingsStatus:
+    global ai_storage_mode
     _require_local_request(request)
     provider = AI_PROVIDERS[payload.provider]
     candidate = replace(
@@ -121,6 +151,22 @@ async def configure_ai_settings(
         test_result = await AIClient(candidate).test_connection()
     except ContractReviewError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        if payload.remember:
+            credential_store.save(
+                StoredAISettings(
+                    provider=payload.provider,
+                    base_url=provider["base_url"],
+                    model=candidate.ai_model_review,
+                    api_key=payload.api_key,
+                )
+            )
+            ai_storage_mode = "encrypted_local"
+        else:
+            credential_store.clear()
+            ai_storage_mode = "memory_only"
+    except SecureSettingsError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     service.update_settings(candidate)
     return _settings_status(
         tested_model=str(test_result["model"]),
@@ -130,8 +176,14 @@ async def configure_ai_settings(
 
 @app.delete("/api/settings/ai", response_model=AISettingsStatus)
 def clear_ai_settings(request: Request) -> AISettingsStatus:
+    global ai_storage_mode
     _require_local_request(request)
+    try:
+        credential_store.clear()
+    except SecureSettingsError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     service.update_settings(replace(service.settings, ai_api_key=""))
+    ai_storage_mode = "memory_only"
     return _settings_status()
 
 
@@ -142,6 +194,16 @@ def sample() -> dict[str, str]:
         "text": settings.sample_path.read_text(encoding="utf-8"),
         "recommended_role": "service_provider",
     }
+
+
+@app.get("/api/legal-library", response_model=LegalLibraryInfo)
+def legal_library_info() -> LegalLibraryInfo:
+    return service.legal_library.info()
+
+
+@app.get("/api/legal-bases", response_model=list[LegalBasis])
+def legal_bases() -> list[LegalBasis]:
+    return service.legal_library.all()
 
 
 @app.post("/api/reviews", response_model=ReviewResult)
@@ -182,6 +244,21 @@ def get_review(review_id: str) -> ReviewResult:
     if result is None:
         raise HTTPException(status_code=404, detail="审查结果不存在或已删除。")
     return result
+
+
+@app.post("/api/reviews/{review_id}/export/docx")
+def export_review_docx(review_id: str, payload: ReviewExportRequest) -> Response:
+    result = store.get(review_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="审查结果不存在或已删除。")
+    report = build_review_docx(result, payload.risk_statuses)
+    base_name = Path(result.filename).stem or "合同"
+    filename = f"{base_name}-合同风险审查报告.docx"
+    return Response(
+        content=report,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
 
 
 @app.delete("/api/reviews/{review_id}")

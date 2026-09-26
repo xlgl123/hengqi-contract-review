@@ -34,6 +34,7 @@ class ReviewStore:
             )
 
     def save(self, result: ReviewResult) -> None:
+        stored_payload = result.model_dump(mode="json", exclude={"document_blocks"})
         with self._connect() as connection:
             connection.execute(
                 """
@@ -45,7 +46,7 @@ class ReviewStore:
                     result.review_id,
                     result.filename,
                     result.engine_mode,
-                    json.dumps(result.model_dump(mode="json"), ensure_ascii=False),
+                    json.dumps(stored_payload, ensure_ascii=False),
                     result.created_at,
                     result.expires_at,
                 ),
